@@ -1,15 +1,13 @@
-# import os
 import sys
 import datetime, time
 from openpyxl import Workbook, load_workbook
 from collections import defaultdict
-# from openpyxl.utils import get_column_letter
-# import argparse
+import logging
 import warnings
 warnings.filterwarnings("ignore")
 
 def input_and_exit():
-    print("按下Enter回车键以退出程序...")
+    logging.info("按下Enter回车键以退出程序...")
     input()
     sys.exit()
 
@@ -22,20 +20,20 @@ def find_duplicates(lst):
     return duplicates
 
 def open_workbook(file_path, sheet_names=None, data_only=True):
-    print(f'正在打开-{file_path}')
+    logging.info(f'正在打开-{file_path}')
     start_time = time.perf_counter()
     try:
         wb = load_workbook(file_path, data_only=data_only)
         end_time = time.perf_counter()  
-        print(f'{file_path.split(".")[0]}.xlsx-打开时间:{end_time - start_time:.6f}秒')
+        logging.info(f'{file_path.split(".")[0]}.xlsx-打开用时:{end_time - start_time:.6f}秒')
         if sheet_names:
             ws_dict = {name: wb[name] for name in sheet_names}
             return wb, ws_dict
         else:
             return wb
     except Exception as e:
-        print(e)
-        print(f'{file_path}-打开失败')
+        logging.warning(e)
+        logging.warning(f'{file_path}-打开失败')
         input_and_exit()
 
 def find_brand_list(ws_cinfo):
@@ -51,7 +49,7 @@ def find_brand_list(ws_cinfo):
 def lookup_value(ws, lookup_col, lookup_val, return_col):
     for row in range(2, ws.max_row + 1):
         if ws.cell(row, lookup_col).value == lookup_val:
-            # print(ws.cell(row, return_col).value)
+            # logging.info(ws.cell(row, return_col).value)
             return ws.cell(row, return_col).value
     return None
 
@@ -59,7 +57,7 @@ def lookup_value(ws, lookup_col, lookup_val, return_col):
 def validate_commodity_data(commodity, required_keys):
     for key in required_keys:
         if commodity.get(key) is None:
-            print(f"商品数据缺失: {key} 查询失败")
+            logging.warning(f"商品数据缺失: {key} 查询失败")
             input_and_exit()
 
 # 处理单件装的商品信息
@@ -99,11 +97,6 @@ def process_print_data(ws_pinfo, commodity, side):
             commodity[print_code_key] = commodity.get(print_name_key) + 'D'
             position_col, code_col = 7, 8
 
-        # print(f"\n[DEBUG] side: {side}")
-        # print(f"[DEBUG] {position_key}: {commodity.get(position_key)}")
-        # print(f"[DEBUG] {print_name_key}: {commodity.get(print_name_key)}")
-        # print(f"[DEBUG] {print_code_key}: {commodity[print_code_key]}")
-        # print(f"[DEBUG] position_col: {position_col}, code_col: {code_col}")
         commodity[position_code_key] = lookup_value(ws_pinfo, position_col, commodity.get(position_key), code_col)
         validate_commodity_data(commodity, [position_code_key])
 
@@ -119,8 +112,8 @@ def process_brand_data(commodity, workbook, sheet_name, specification_brand, bra
     try:
         worksheet = workbook[sheet_name]
     except Exception as e:
-        print(e)
-        print(f"{brand_code} 吊牌信息-打开失败: {sheet_name} 表")
+        logging.warning(e)
+        logging.warning(f"{brand_code} 吊牌信息-打开失败: {sheet_name} 表")
         input_and_exit()
 
     trademark_list = []
@@ -129,7 +122,7 @@ def process_brand_data(commodity, workbook, sheet_name, specification_brand, bra
             trademark_list = [worksheet.cell(li, j).value for j in range(range_columns[0], range_columns[1])]
     
     if len(trademark_list) == 0:
-        print(f"{brand_code} 吊牌信息汇总表查询失败-《{commodity.get('品类')}》分表中找不到{commodity.get('单件组合装款式编码')} {specification_brand}")
+        logging.warning(f"{brand_code} 吊牌信息汇总表查询失败-《{commodity.get('品类')}》分表中找不到{commodity.get('单件组合装款式编码')} {specification_brand}")
         input_and_exit()
     else:
         return trademark_list
@@ -168,16 +161,20 @@ def append_codes(picture_position_color_list, picture_color_list, color_list, te
     color_list.append(color)
 
 if __name__ == "__main__":
-    # parser = argparse.ArgumentParser(description='YS公司自动化程序')
-    # parser.add_argument('file1', help='xx文件')
-    # parser.add_argument('file2', type=int, help='xx文件')
-    # args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    # path = os.path.dirname(os.path.abspath(__file__))
+    # logging.basicConfig(
+    #     level=logging.INFO,
+    #     format='%(asctime)s - %(levelname)s - %(message)s',
+    #     handlers=[
+    #         logging.FileHandler('ys_product_log.log'),  # 输出到文件
+    #         logging.StreamHandler()                    # 同时输出到控制台
+    #     ]
+    # )
 
-    print('*************************************')
-    print('*       YS商品编码器程序v1.0        *')
-    print('*************************************')
+    logging.info('*************************************')
+    logging.info('*       YS商品编码器程序v1.0        *')
+    logging.info('*************************************')
 
     wb_cinfo, ws_cinfo_dict = open_workbook('商品编码信息表.xlsx', ['商品编码信息表1'])
     ws_cinfo = ws_cinfo_dict['商品编码信息表1']
@@ -229,26 +226,19 @@ if __name__ == "__main__":
     s = set()
     ws_multiple_combination_tmplst = []
 
-    # 设置列宽
-    # lst = [ws_single_general, ws_single_combination, ws_multiple_combination]
-    # for l in lst:
-    #     for i in range(1, l.max_column + 1):
-    #         l.column_dimensions[get_column_letter(i)].width = 20.0
-    
-
     # 关系对照表从第二行开始填充数据
     relationship_row = 2
     commodities = []
 
     for ci in range(4, ws_cinfo.max_row + 1): 
-        print(f'_________________读第{ci}行________________')
+        logging.info(f'_________________读第{ci}行________________')
         if  ws_cinfo.cell(ci, 2).value == None:
             continue
 
         count = 0
         # 遍历G到J列
         for i in range(7, 11):
-            if ws_cinfo.cell(ci, i).value is None or ws_cinfo.cell(ci, i).value is 0:
+            if ws_cinfo.cell(ci, i).value is None or ws_cinfo.cell(ci, i).value == 0:
                 continue
             item = {}
             item['品类'] = ws_cinfo.cell(ci, i).value
@@ -258,9 +248,7 @@ if __name__ == "__main__":
             item['位置-前'] = ws_cinfo.cell(ci, 7+i+count*4).value
             tmp = ws_cinfo.cell(ci, 8+i+count*4).value
             item['印花名称-后'] = str(tmp) if tmp is not None else tmp
-
             item['位置-后'] = ws_cinfo.cell(ci, 9+i+count*4).value
-            
             item['单件组合装款式编码'] = ws_cinfo.cell(ci, 5).value
             item['组合装款式编码'] = ws_cinfo.cell(ci, 6).value
             item['品牌'] = ws_cinfo.cell(ci, 2).value
@@ -272,10 +260,10 @@ if __name__ == "__main__":
             count = count + 1
             commodities.append(item)
 
-        # print(commodities)
+        # logging.info(commodities)
         # sys.exit()
         for commodity in commodities:
-            print(commodity)
+            logging.info(commodity)
             # 处理单件装和多件装
             if len(commodities) == 1 and commodity.get('组合形式') == '单件装':
                 process_single_item(ws_sinfo, commodity)
@@ -286,7 +274,7 @@ if __name__ == "__main__":
             process_print_data(ws_pinfo, commodity, '前')
             process_print_data(ws_pinfo, commodity, '后')
 
-            # print(commodities)
+            # logging.info(commodities)
             # sys.exit()
             for size in commodity.get('尺码').split('/'):
                 # 如果只有前印花编码
@@ -335,14 +323,14 @@ if __name__ == "__main__":
                         commodity['重量'] = ws_winfo.cell(wi, 3).value
                         break
                 if commodity.get('重量') is None:
-                    print(f"称重表查询失败: {commodity.get('品类')} {size}")
+                    logging.warning(f"称重表查询失败: {commodity.get('品类')} {size}")
                     input_and_exit()
 
                 # 各品牌处理
                 trademark_list = []
 
                 if commodity.get('品牌') == 'HL':
-                    # print(f'trademark_HL_A1:{trademark_HL_A1}')
+                    # logging.info(f'trademark_HL_A1:{trademark_HL_A1}')
                     if commodity.get('组合形式') == '多件装':
                         commodity['组合装款式商品编码'] = commodity.get('组合装款式商品编码')[0:4] + 'HL' + commodity.get('组合装款式商品编码')[-1:]
 
@@ -350,20 +338,20 @@ if __name__ == "__main__":
                     try:
                         ws_HL = wb_HL[commodity.get('品类')]
                     except Exception as e:
-                        print(e)
-                        print(f"回力吊牌信息-打开失败:{commodity.get('品类')}表")
-                        print("按下Enter回车键以退出程序...")
+                        logging.warning(e)
+                        logging.warning(f"回力吊牌信息-打开失败:{commodity.get('品类')}表")
+                        logging.info("按下Enter回车键以退出程序...")
                         input()
                         sys.exit()
 
                     HL_type = ''
                     for li in range(2, ws_HL_type.max_row + 1):
-                        # print(f'{ws_HL_type.cell(li, 1).value}/{ws_HL_type.cell(li, 2).value}')
+                        # logging.info(f'{ws_HL_type.cell(li, 1).value}/{ws_HL_type.cell(li, 2).value}')
                         if ws_HL_type.cell(li, 1).value == commodity.get('品类') and ws_HL_type.cell(li, 2).value == int(size):
                             HL_type = ws_HL_type.cell(li, 3).value
                     if len(HL_type) == 0:
-                        print(f"回力童装号型对照表查询失败:{commodity.get('品类')}/{size}")
-                        print("按下Enter回车键以退出程序...")
+                        logging.warning(f"回力童装号型对照表查询失败:{commodity.get('品类')}/{size}")
+                        logging.info("按下Enter回车键以退出程序...")
                         input()
                         sys.exit()
 
@@ -373,8 +361,8 @@ if __name__ == "__main__":
                             trademark_list.insert(1, HL_type)
                             trademark_list.insert(6, size)
                     if len(trademark_list) == 0:
-                        print('回力吊牌信息汇总表查询失败')
-                        print("按下Enter回车键以退出程序...")
+                        logging.warning('回力吊牌信息汇总表查询失败')
+                        logging.info("按下Enter回车键以退出程序...")
                         input()
                         sys.exit()
 
@@ -500,7 +488,7 @@ if __name__ == "__main__":
         duplicates = find_duplicates(ws_multiple_combination_tmplst)
         list_multiple_combination.clear()
         for duplicate in duplicates:
-                # print(duplicate)
+                # logging.info(duplicate)
                 list_multiple_combination = duplicate[0]
                 list_multiple_combination[-3] = duplicate[1]
                 ws_multiple_combination.append(list_multiple_combination)
@@ -508,14 +496,13 @@ if __name__ == "__main__":
     wb_cinfo.close()
     now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-    print(' ')
-    print('_________________制作完成________________')
-    print(f'编码生成表_{now}.xlsx')
+    logging.info('_________________制作完成________________')
+    logging.info(f'保存编码生成表到文件: 编码生成表_{now}.xlsx')
     wb_final.save(f'编码生成表_{now}.xlsx')
 
-    print(f'关系对应生成表_{now}.xlsx')
+    logging.info(f'保存关系对应表到文件: 关系对应生成表_{now}.xlsx')
     wb_relationship.save(f'关系对应生成表_{now}.xlsx')
 
-    print(" ")
-    print("按下Enter回车键以退出程序...")
+    logging.info(" ")
+    logging.info("按下Enter回车键以退出程序...")
     input()
