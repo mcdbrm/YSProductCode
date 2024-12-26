@@ -228,7 +228,6 @@ if __name__ == "__main__":
 
     # 关系对照表从第二行开始填充数据
     relationship_row = 2
-    commodities = []
 
     for ci in range(4, ws_cinfo.max_row + 1): 
         logging.info(f'_________________读第{ci}行________________')
@@ -236,6 +235,7 @@ if __name__ == "__main__":
             continue
 
         count = 0
+        commodities = []
         # 遍历G到J列
         for i in range(7, 11):
             if ws_cinfo.cell(ci, i).value is None or ws_cinfo.cell(ci, i).value == 0:
