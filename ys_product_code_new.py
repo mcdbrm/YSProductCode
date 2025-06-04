@@ -1,508 +1,631 @@
 import sys
-import datetime, time
+import datetime
+import time
 from openpyxl import Workbook, load_workbook
 from collections import defaultdict
 import logging
 import warnings
+from typing import Dict, List, Optional, Set, Tuple, Union, Any
+
+# 配置日志和警告
 warnings.filterwarnings("ignore")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def input_and_exit():
-    logging.info("按下Enter回车键以退出程序...")
-    input()
-    sys.exit()
+class ProductCodeGenerator:
+    """商品编码生成器"""
+    
+    def __init__(self):
+        self.processed_codes: Set[str] = set()  # 存储已处理的商品编码
+        self.brand_workbooks: Dict[str, Workbook] = {}  # 各品牌的工作簿
+        self.size_chart_worksheet: Optional[Workbook] = None  # 回力童装号型对照表
+        
+    @staticmethod
+    def wait_for_exit() -> None:
+        """等待用户输入后退出程序"""
+        logging.info("按下Enter回车键以退出程序...")
+        input()
+        sys.exit()
+    
+    @staticmethod
+    def find_duplicate_items(item_list: List[List]) -> List[List]:
+        """查找列表中的重复项并统计出现次数"""
+        count_dict = defaultdict(int)
+        for item in item_list:
+            count_dict[tuple(item)] += 1
+        return [[list(key), value] for key, value in count_dict.items()]
+    
+    def load_excel_file(self, file_path: str, sheet_names: Optional[List[str]] = None, 
+                      data_only: bool = True) -> Union[Workbook, Tuple[Workbook, Dict]]:
+        """加载Excel文件"""
+        logging.info(f'正在打开文件: {file_path}')
+        start_time = time.perf_counter()
+        try:
+            workbook = load_workbook(file_path, data_only=data_only)
+            end_time = time.perf_counter()  
+            file_name = file_path.split(".")[0]
+            logging.info(f'{file_name}.xlsx 加载用时: {end_time - start_time:.6f}秒')
+            
+            if sheet_names:
+                worksheets = {name: workbook[name] for name in sheet_names}
+                return workbook, worksheets
+            return workbook
+        except Exception as e:
+            logging.error(f'{file_path} 加载失败: {str(e)}')
+            self.wait_for_exit()
+    
+    @staticmethod
+    def get_unique_brands(worksheet) -> List[str]:
+        """从商品信息表中获取品牌列表"""
+        return list({worksheet.cell(row, 2).value 
+                   for row in range(2, worksheet.max_row + 1) 
+                   if worksheet.cell(row, 2).value is not None})
+    
+    @staticmethod
+    def find_matching_value(worksheet, lookup_col: int, lookup_val: str, 
+                          return_col: int) -> Optional[str]:
+        """在工作表中查找匹配的值"""
+        for row in range(2, worksheet.max_row + 1):
+            if worksheet.cell(row, lookup_col).value == lookup_val:
+                return worksheet.cell(row, return_col).value
+        return None
+    
+    @staticmethod
+    def validate_required_fields(product: Dict, required_keys: List[str]) -> None:
+        """验证商品数据是否包含必需字段"""
+        for key in required_keys:
+            if product.get(key) is None:
+                logging.error(f"商品数据缺失: {key} 字段")
+                raise ValueError(f"缺少必需的字段: {key}")
+    
+    def process_single_product(self, product_info: Dict, worksheet) -> None:
+        """处理单件装商品信息"""
+        for row in range(2, worksheet.max_row + 1):
+            if worksheet.cell(row, 4).value == product_info.get('品类'):
+                product_info.update({
+                    '商品分类': worksheet.cell(row, 3).value,
+                    '季节': worksheet.cell(row, 1).value
+                })
+                break
+        self.validate_required_fields(product_info, ['商品分类', '季节'])
+    
+    def process_combo_product(self, product_info: Dict, info_worksheet, combo_worksheet) -> None:
+        """处理多件装商品信息"""
+        for row in range(2, info_worksheet.max_row + 1):
+            if info_worksheet.cell(row, 4).value == product_info.get('品类'):
+                product_info.update({
+                    '商品分类': info_worksheet.cell(row, 3).value,
+                    '季节': info_worksheet.cell(row, 1).value,
+                    '单件组合装款式编码': info_worksheet.cell(row, 6).value
+                })
+                break
+        self.validate_required_fields(product_info, ['商品分类', '季节', '单件组合装款式编码'])
+        
+        # 查找组合装款式商品编码
+        product_info['组合装款式商品编码'] = self.find_matching_value(
+            combo_worksheet, 4, product_info.get('组合装款式编码'), 3)
+        self.validate_required_fields(product_info, ['组合装款式商品编码'])
+    
+    def process_print_info(self, print_worksheet, product_info: Dict, side: str) -> None:
+        """处理印花信息（前或后）"""
+        position_key = f'位置-{side}'
+        print_name_key = f'印花名称-{side}'
+        print_code_key = f'印花编码-{side}'
+        position_code_key = f'位置代码-{side}'
 
-def find_duplicates(lst):
-    element_count = defaultdict(int)
-    for element in lst:
-        element_count[tuple(element)] += 1
+        # 如果没有印花名称则跳过
+        if product_info.get(print_name_key) is None:
+            return
 
-    duplicates = [[list(key), value] for key, value in element_count.items()]
-    return duplicates
-
-def open_workbook(file_path, sheet_names=None, data_only=True):
-    logging.info(f'正在打开-{file_path}')
-    start_time = time.perf_counter()
-    try:
-        wb = load_workbook(file_path, data_only=data_only)
-        end_time = time.perf_counter()  
-        logging.info(f'{file_path.split(".")[0]}.xlsx-打开用时:{end_time - start_time:.6f}秒')
-        if sheet_names:
-            ws_dict = {name: wb[name] for name in sheet_names}
-            return wb, ws_dict
-        else:
-            return wb
-    except Exception as e:
-        logging.warning(e)
-        logging.warning(f'{file_path}-打开失败')
-        input_and_exit()
-
-def find_brand_list(ws_cinfo):
-    brand_list = []
-    for i in range(2, ws_cinfo.max_row + 1):
-        brand = ws_cinfo.cell(i, 2).value
-        if brand is None:
-            continue
-        brand_list.append(brand)
-    return list(set(brand_list))
-
-# 根据某列的值查找并返回另一列的值
-def lookup_value(ws, lookup_col, lookup_val, return_col):
-    for row in range(2, ws.max_row + 1):
-        if ws.cell(row, lookup_col).value == lookup_val:
-            # logging.info(ws.cell(row, return_col).value)
-            return ws.cell(row, return_col).value
-    return None
-
-# 检查商品是否缺少必需的字段，若缺少则退出程序
-def validate_commodity_data(commodity, required_keys):
-    for key in required_keys:
-        if commodity.get(key) is None:
-            logging.warning(f"商品数据缺失: {key} 查询失败")
-            input_and_exit()
-
-# 处理单件装的商品信息
-def process_single_item(ws_sinfo, commodity):
-    for row in range(2, ws_sinfo.max_row + 1):
-        if ws_sinfo.cell(row, 4).value == commodity.get('品类'):
-            commodity['商品分类'] = ws_sinfo.cell(row, 3).value
-            commodity['季节'] = ws_sinfo.cell(row, 1).value
-            break
-    validate_commodity_data(commodity, ['商品分类', '季节'])
-
-# 处理多件装的商品信息
-def process_multi_item(ws_sinfo, ws_minfo, commodity):
-    for row in range(2, ws_sinfo.max_row + 1):
-        if ws_sinfo.cell(row, 4).value == commodity.get('品类'):
-            commodity['商品分类'] = ws_sinfo.cell(row, 3).value
-            commodity['季节'] = ws_sinfo.cell(row, 1).value
-            commodity['单件组合装款式编码'] = ws_sinfo.cell(row, 6).value
-            break
-    validate_commodity_data(commodity, ['商品分类', '季节', '单件组合装款式编码'])
-
-    commodity['组合装款式商品编码'] = lookup_value(ws_minfo, 4, commodity.get('组合装款式编码'), 3)
-    validate_commodity_data(commodity, ['组合装款式商品编码'])
-
-# 处理印花相关信息，side 为 '前' 或 '后'
-def process_print_data(ws_pinfo, commodity, side):
-    position_key = f'位置-{side}'
-    print_name_key = f'印花名称-{side}'
-    print_code_key = f'印花编码-{side}'
-    position_code_key = f'位置代码-{side}'
-
-    if commodity.get(print_name_key) is not None:
-        if commodity.get(position_key) in ["胸", "裤"]:
-            commodity[print_code_key] = commodity.get(print_name_key) + 'X'
+        # 根据位置生成印花编码
+        if product_info.get(position_key) in ["胸", "裤"]:
+            product_info[print_code_key] = f"{product_info.get(print_name_key)}X"
             position_col, code_col = 10, 11
         else:
-            commodity[print_code_key] = commodity.get(print_name_key) + 'D'
+            product_info[print_code_key] = f"{product_info.get(print_name_key)}D"
             position_col, code_col = 7, 8
 
-        commodity[position_code_key] = lookup_value(ws_pinfo, position_col, commodity.get(position_key), code_col)
-        validate_commodity_data(commodity, [position_code_key])
+        # 查找位置代码
+        product_info[position_code_key] = self.find_matching_value(
+            print_worksheet, position_col, product_info.get(position_key), code_col)
+        self.validate_required_fields(product_info, [position_code_key])
 
-        commodity[print_name_key] = lookup_value(ws_pinfo, 4, commodity.get(print_code_key), 1)
-        validate_commodity_data(commodity, [print_name_key])
-
-# 处理不同品牌的商品数据（除HL之外）
-def process_brand_data(commodity, workbook, sheet_name, specification_brand, brand_code, range_columns, gender=None):
-    if commodity.get('组合形式') == '多件装':
-        temp = commodity.get('组合装款式商品编码')
-        commodity['组合装款式商品编码'] = temp[0:4] + brand_code + temp[-1:]
-
-    try:
-        worksheet = workbook[sheet_name]
-    except Exception as e:
-        logging.warning(e)
-        logging.warning(f"{brand_code} 吊牌信息-打开失败: {sheet_name} 表")
-        input_and_exit()
-
-    trademark_list = []
-    for li in range(2, worksheet.max_row + 1):
-        if worksheet.cell(li, 1).value == commodity.get('单件组合装款式编码') and worksheet.cell(li, 2).value == specification_brand:
-            trademark_list = [worksheet.cell(li, j).value for j in range(range_columns[0], range_columns[1])]
+        # 查找印花名称
+        product_info[print_name_key] = self.find_matching_value(
+            print_worksheet, 4, product_info.get(print_code_key), 1)
+        self.validate_required_fields(product_info, [print_name_key])
     
-    if len(trademark_list) == 0:
-        logging.warning(f"{brand_code} 吊牌信息汇总表查询失败-《{commodity.get('品类')}》分表中找不到{commodity.get('单件组合装款式编码')} {specification_brand}")
-        input_and_exit()
-    else:
-        return trademark_list
+    def fetch_brand_data(self, product_info: Dict, sheet_name: str, 
+                       specification_brand: str, brand_code: str, 
+                       column_range: Tuple[int, int]) -> List:
+        """获取品牌特定数据"""
+        if product_info.get('组合形式') == '多件装':
+            temp_value = product_info.get('组合装款式商品编码')
+            product_info['组合装款式商品编码'] = f"{temp_value[:4]}{brand_code}{temp_value[-1:]}"
 
-# 添加单件组合装信息到组合表中
-def append_combination(commodity, combination_commodity_code, s_commodity_name, entity_code, specification, code, trademark_list, ws_single_combination, s):
-    list_single_combination = [
-        commodity.get('单件组合装款式编码'),
-        combination_commodity_code,
-        s_commodity_name,
-        entity_code,
-        '成品',
-        specification,
-        code,
-        1,
-        0,
-        'YS'
-    ] + trademark_list
+        try:
+            worksheet = self.brand_workbooks[brand_code][sheet_name]
+        except Exception as e:
+            logging.error(f"{brand_code} 吊牌信息表加载失败: {sheet_name}: {str(e)}")
+            self.wait_for_exit()
 
-    if combination_commodity_code + code not in s:
-        s.add(combination_commodity_code + code)
-        ws_single_combination.append(list_single_combination)
-
-# 临时编码
-def generate_temp_codes(commodity, position_prefix, color):
-    if commodity.get(f'位置-{position_prefix}') == '大图':
-        commodity[f'位置-{position_prefix}'] = ''
-    temp_code1 = commodity.get(f'印花名称-{position_prefix}') + commodity.get(f'位置代码-{position_prefix}') + '/' + color
-    temp_code2 = commodity.get(f'印花名称-{position_prefix}') + commodity.get(f'位置-{position_prefix}') + '/' + color
-    return temp_code1, temp_code2
-
-# 临时编码追加到对应列表
-def append_codes(picture_position_color_list, picture_color_list, color_list, temp_code1, temp_code2, color):
-    picture_position_color_list.append(temp_code1)
-    picture_color_list.append(temp_code2)
-    color_list.append(color)
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-    # logging.basicConfig(
-    #     level=logging.INFO,
-    #     format='%(asctime)s - %(levelname)s - %(message)s',
-    #     handlers=[
-    #         logging.FileHandler('ys_product_log.log'),  # 输出到文件
-    #         logging.StreamHandler()                    # 同时输出到控制台
-    #     ]
-    # )
-
-    logging.info('*************************************')
-    logging.info('*       YS商品编码器程序v1.0        *')
-    logging.info('*************************************')
-
-    wb_cinfo, ws_cinfo_dict = open_workbook('商品编码信息表.xlsx', ['商品编码信息表1'])
-    ws_cinfo = ws_cinfo_dict['商品编码信息表1']
-
-    wb_baseinfo, ws_baseinfo_dict = open_workbook('资料生成器.xlsx', ['附表1印花基础资料', '附表2单品基础资料', '附表3多件装基础信息', '大货称重表'])
-    ws_pinfo = ws_baseinfo_dict['附表1印花基础资料']
-    ws_sinfo = ws_baseinfo_dict['附表2单品基础资料']
-    ws_minfo = ws_baseinfo_dict['附表3多件装基础信息']
-    ws_winfo = ws_baseinfo_dict['大货称重表']
-
-    wb_relationship, wb_relationship_dict = open_workbook('商品对应关系.xlsx', ['Sheet1'])
-    ws_relationship = wb_relationship['Sheet1']
+        # 在品牌工作表中查找匹配的数据
+        for data_row in range(2, worksheet.max_row + 1):
+            if (worksheet.cell(data_row, 1).value == product_info.get('单件组合装款式编码') and 
+                worksheet.cell(data_row, 2).value == specification_brand):
+                start_col, end_col = column_range
+                return [worksheet.cell(data_row, col).value for col in range(start_col, end_col)]
+        
+        logging.error(f"{brand_code} 吊牌信息汇总表查询失败-《{product_info.get('品类')}》分表中找不到{product_info.get('单件组合装款式编码')} {specification_brand}")
+        self.wait_for_exit()
     
-    brand_list = find_brand_list(ws_cinfo)
-    if brand_list:
+    def add_combo_record(self, product_info: Dict, combo_code: str, 
+                       product_name: str, entity_code: str, specification: str, 
+                       code: str, trademark_data: List, worksheet) -> None:
+        """添加组合装记录到工作表"""
+        record_data = [
+            product_info.get('单件组合装款式编码'),
+            combo_code,
+            product_name,
+            entity_code,
+            '成品',
+            specification,
+            code,
+            1,
+            0,
+            'YS'
+        ] + trademark_data
+
+        unique_id = combo_code + code
+        if unique_id not in self.processed_codes:
+            self.processed_codes.add(unique_id)
+            worksheet.append(record_data)
+    
+    @staticmethod
+    def generate_print_codes(product_info: Dict, side_prefix: str, color: str) -> Tuple[str, str]:
+        """生成印花相关临时编码"""
+        position = '' if product_info.get(f'位置-{side_prefix}') == '大图' else product_info.get(f'位置-{side_prefix}')
+        code1 = f"{product_info.get(f'印花名称-{side_prefix}')}{product_info.get(f'位置代码-{side_prefix}')}/{color}"
+        code2 = f"{product_info.get(f'印花名称-{side_prefix}')}{position}/{color}"
+        return code1, code2
+    
+    @staticmethod
+    def store_print_codes(position_color_list: List, color_list: List, 
+                        color_value_list: List, code1: str, code2: str, color: str) -> None:
+        """存储印花编码到对应列表"""
+        position_color_list.append(code1)
+        color_list.append(code2)
+        color_value_list.append(color)
+    
+    def generate_product_codes(self) -> None:
+        """主处理流程 - 生成商品编码"""
+        # 打开所有必要的工作簿
+        info_wb, info_ws_dict = self.load_excel_file('商品编码信息表.xlsx', ['商品编码信息表1'])
+        product_info_ws = info_ws_dict['商品编码信息表1']
+
+        base_wb, base_ws_dict = self.load_excel_file('资料生成器.xlsx', 
+            ['附表1印花基础资料', '附表2单品基础资料', '附表3多件装基础信息', '大货称重表'])
+        print_info_ws = base_ws_dict['附表1印花基础资料']
+        product_base_ws = base_ws_dict['附表2单品基础资料']
+        combo_info_ws = base_ws_dict['附表3多件装基础信息']
+        weight_info_ws = base_ws_dict['大货称重表']
+
+        relation_wb, _ = self.load_excel_file('商品对应关系.xlsx', ['Sheet1'])
+        relation_ws = relation_wb['Sheet1']
+        
+        # 加载品牌工作簿
+        brand_list = self.get_unique_brands(product_info_ws)
+        self.load_brand_files(brand_list)
+
+        # 创建结果工作簿
+        result_wb = Workbook()
+        single_general_ws = result_wb.active
+        single_general_ws.title = '单品-普通资料'
+        self.setup_single_general_sheet(single_general_ws)
+        
+        single_combo_ws = result_wb.create_sheet('单品-组合构成')
+        self.setup_single_combo_sheet(single_combo_ws)
+        
+        multi_combo_ws = result_wb.create_sheet('多件装-组合构成')
+        self.setup_multi_combo_sheet(multi_combo_ws)
+        
+        # 关系对照表从第二行开始填充
+        relation_row = 2
+        multi_combo_temp_list = []
+
+        # 处理每一行商品信息
+        for row_index in range(4, product_info_ws.max_row + 1):
+            if product_info_ws.cell(row_index, 2).value is None:
+                continue
+                
+            logging.info(f'处理第 {row_index} 行数据')
+            products = self._extract_products_from_row(product_info_ws, row_index)
+            
+            for product in products:
+                try:
+                    self._process_product(
+                        product, print_info_ws, product_base_ws, combo_info_ws, weight_info_ws, 
+                        single_general_ws, single_combo_ws, 
+                        multi_combo_temp_list, relation_ws, 
+                        relation_row
+                    )
+                    relation_row += 1
+                except Exception as e:
+                    logging.error(f"处理商品时出错: {str(e)}")
+                    continue
+
+        # 处理多件装组合
+        if multi_combo_temp_list:
+            duplicates = self.find_duplicate_items(multi_combo_temp_list)
+            for duplicate in duplicates:
+                combo_data = duplicate[0]
+                combo_data[-3] = duplicate[1]  # 设置数量
+                multi_combo_ws.append(combo_data)
+
+        # 保存结果文件
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        logging.info('商品编码生成完成')
+        logging.info(f'保存编码生成表: 编码生成表_{timestamp}.xlsx')
+        result_wb.save(f'编码生成表_{timestamp}.xlsx')
+
+        logging.info(f'保存关系对应表: 关系对应生成表_{timestamp}.xlsx')
+        relation_wb.save(f'关系对应生成表_{timestamp}.xlsx')
+
+    def load_brand_files(self, brand_list: List[str]) -> None:
+        """加载品牌相关Excel文件"""
         if 'HL' in brand_list:
-            wb_HL, ws_HL_type_dict = open_workbook('回力吊牌信息汇总表.xlsx', ['回力童装号型对照表'])
-            ws_HL_type = ws_HL_type_dict['回力童装号型对照表']
+            hl_wb, hl_ws_dict = self.load_excel_file('回力吊牌信息汇总表.xlsx', ['回力童装号型对照表'])
+            self.brand_workbooks['HL'] = hl_wb
+            self.size_chart_worksheet = hl_ws_dict['回力童装号型对照表']
 
         if 'BD' in brand_list:
-            wb_BD = open_workbook('巴帝吊牌信息汇总表.xlsx')
+            self.brand_workbooks['BD'] = self.load_excel_file('巴帝吊牌信息汇总表.xlsx')
 
         if 'SE' in brand_list:
-            wb_SE = open_workbook('少宜吊牌信息汇总表.xlsx')
+            self.brand_workbooks['SE'] = self.load_excel_file('少宜吊牌信息汇总表.xlsx')
         
         if 'ML' in brand_list:
-            wb_ML_male = open_workbook('菲尔吊牌信息汇总表-男童.xlsx')
-            wb_ML_female = open_workbook('菲尔吊牌信息汇总表-女童.xlsx')
+            self.brand_workbooks['ML_male'] = self.load_excel_file('菲尔吊牌信息汇总表-男童.xlsx')
+            self.brand_workbooks['ML_female'] = self.load_excel_file('菲尔吊牌信息汇总表-女童.xlsx')
 
         if 'JW' in brand_list:
-            wb_JW_male = open_workbook('真维斯吊牌信息汇总表-男童.xlsx')
-            wb_JW_female = open_workbook('真维斯吊牌信息汇总表-女童.xlsx')
+            self.brand_workbooks['JW_male'] = self.load_excel_file('真维斯吊牌信息汇总表-男童.xlsx')
+            self.brand_workbooks['JW_female'] = self.load_excel_file('真维斯吊牌信息汇总表-女童.xlsx')
 
-    # 创建汇总表
-    wb_final = Workbook()
-    ws_single_general = wb_final.active
-    ws_single_general.title = '单品-普通资料'
-    ws_single_general.append(['款式编码','商品编码','商品名','分类','颜色及规格', '重量', '品牌', '虚拟分类', '国标码', \
-                              '其它属性1', '其它属性2', '其它属性3', '其它属性4', '其它属性5', '其它属性6', '其它属性7', \
-                                '其它属性8', '其它属性9', '其它属性10'])
-    ws_single_combination = wb_final.create_sheet('单品-组合构成')
-    ws_single_combination.append(['组合款式编码', '组合商品编码', '组合商品名称', '组合商品实体编码', '虚拟分类', \
-                                  '组合颜色规格',  '商品编码', '数量', '应占售价', '品牌', '组合装国标码', \
-                                    '其它属性1', '其它属性2', '其它属性3', '其它属性4', '其它属性5', '其它属性6', \
-                                        '其它属性7', '其它属性8', '其它属性9', '其它属性10'])
-    ws_multiple_combination = wb_final.create_sheet('多件装-组合构成')
-    ws_multiple_combination.append(['组合款式编码', '组合商品编码', '组合商品名称', '虚拟分类', '组合颜色规格', \
-                                    '商品编码', '数量', '应占售价', '品牌'])
-    s = set()
-    ws_multiple_combination_tmplst = []
+    def setup_single_general_sheet(self, worksheet) -> None:
+        """初始化单品普通资料表"""
+        headers = [
+            '款式编码', '商品编码', '商品名', '分类', '颜色及规格', '重量', '品牌', '虚拟分类', '国标码',
+            '其它属性1', '其它属性2', '其它属性3', '其它属性4', '其它属性5', '其它属性6', '其它属性7',
+            '其它属性8', '其它属性9', '其它属性10'
+        ]
+        worksheet.append(headers)
 
-    # 关系对照表从第二行开始填充数据
-    relationship_row = 2
+    def setup_single_combo_sheet(self, worksheet) -> None:
+        """初始化单品组合构成表"""
+        headers = [
+            '组合款式编码', '组合商品编码', '组合商品名称', '组合商品实体编码', '虚拟分类',
+            '组合颜色规格', '商品编码', '数量', '应占售价', '品牌', '组合装国标码',
+            '其它属性1', '其它属性2', '其它属性3', '其它属性4', '其它属性5', '其它属性6',
+            '其它属性7', '其它属性8', '其它属性9', '其它属性10'
+        ]
+        worksheet.append(headers)
 
-    for ci in range(4, ws_cinfo.max_row + 1): 
-        logging.info(f'_________________读第{ci}行________________')
-        if  ws_cinfo.cell(ci, 2).value == None:
-            continue
+    def setup_multi_combo_sheet(self, worksheet) -> None:
+        """初始化多件装组合构成表"""
+        headers = [
+            '组合款式编码', '组合商品编码', '组合商品名称', '虚拟分类', '组合颜色规格',
+            '商品编码', '数量', '应占售价', '品牌'
+        ]
+        worksheet.append(headers)
 
+    def _extract_products_from_row(self, worksheet, row_index: int) -> List[Dict]:
+        """从工作表的行中提取商品信息"""
+        products = []
         count = 0
-        commodities = []
-        # 遍历G到J列
-        for i in range(7, 11):
-            if ws_cinfo.cell(ci, i).value is None or ws_cinfo.cell(ci, i).value == 0:
+        
+        for col in range(7, 11):  # 遍历G到J列
+            if worksheet.cell(row_index, col).value is None or worksheet.cell(row_index, col).value == 0:
                 continue
-            item = {}
-            item['品类'] = ws_cinfo.cell(ci, i).value
-            item['颜色'] = ws_cinfo.cell(ci, 5+i+count*4).value
-            tmp = ws_cinfo.cell(ci, 6+i+count*4).value
-            item['印花名称-前'] = str(tmp) if tmp is not None else tmp
-            item['位置-前'] = ws_cinfo.cell(ci, 7+i+count*4).value
-            tmp = ws_cinfo.cell(ci, 8+i+count*4).value
-            item['印花名称-后'] = str(tmp) if tmp is not None else tmp
-            item['位置-后'] = ws_cinfo.cell(ci, 9+i+count*4).value
-            item['单件组合装款式编码'] = ws_cinfo.cell(ci, 5).value
-            item['组合装款式编码'] = ws_cinfo.cell(ci, 6).value
-            item['品牌'] = ws_cinfo.cell(ci, 2).value
-            item['组合形式'] = ws_cinfo.cell(ci, 3).value
-            item['性别'] = ws_cinfo.cell(ci, 4).value
-            item['尺码'] = ws_cinfo.cell(ci, 11).value
-            item['数量'] = ''
+                
+            product_data = {
+                '品类': worksheet.cell(row_index, col).value,
+                '颜色': worksheet.cell(row_index, 5+col+count*4).value,
+                '印花名称-前': str(worksheet.cell(row_index, 6+col+count*4).value) 
+                            if worksheet.cell(row_index, 6+col+count*4).value is not None else None,
+                '位置-前': worksheet.cell(row_index, 7+col+count*4).value,
+                '印花名称-后': str(worksheet.cell(row_index, 8+col+count*4).value) 
+                            if worksheet.cell(row_index, 8+col+count*4).value is not None else None,
+                '位置-后': worksheet.cell(row_index, 9+col+count*4).value,
+                '单件组合装款式编码': worksheet.cell(row_index, 5).value,
+                '组合装款式编码': worksheet.cell(row_index, 6).value,
+                '品牌': worksheet.cell(row_index, 2).value,
+                '组合形式': worksheet.cell(row_index, 3).value,
+                '性别': worksheet.cell(row_index, 4).value,
+                '尺码': worksheet.cell(row_index, 11).value,
+                '数量': ''
+            }
+            count += 1
+            products.append(product_data)
             
-            count = count + 1
-            commodities.append(item)
+        return products
 
-        # logging.info(commodities)
-        # sys.exit()
-        for commodity in commodities:
-            logging.info(commodity)
-            # 处理单件装和多件装
-            if len(commodities) == 1 and commodity.get('组合形式') == '单件装':
-                process_single_item(ws_sinfo, commodity)
-            elif commodity.get('组合形式') == '多件装':
-                process_multi_item(ws_sinfo, ws_minfo, commodity)
+    def _process_product(self, product_info: Dict, print_worksheet, base_worksheet, combo_worksheet, weight_worksheet, 
+                      single_general_ws, single_combo_ws, 
+                      multi_combo_list, relation_ws, 
+                      relation_row: int) -> None:
+        """处理单个商品信息"""
+        logging.info(product_info)
+        
+        # 处理商品类型（单件装/多件装）
+        if product_info.get('组合形式') == '单件装':
+            self.process_single_product(product_info, base_worksheet)
+        elif product_info.get('组合形式') == '多件装':
+            self.process_combo_product(product_info, base_worksheet, combo_worksheet)
 
-            # 处理前后的印花信息
-            process_print_data(ws_pinfo, commodity, '前')
-            process_print_data(ws_pinfo, commodity, '后')
+        # 处理印花信息
+        self.process_print_info(print_worksheet, product_info, '前')
+        self.process_print_info(print_worksheet, product_info, '后')
 
-            # logging.info(commodities)
-            # sys.exit()
-            for size in commodity.get('尺码').split('/'):
-                # 如果只有前印花编码
-                if commodity.get('印花编码-前') and not commodity.get('印花编码-后'):
-                    position_front = '' if commodity.get('位置-前') == '大图' else commodity.get('位置-前')
-                    commodity_code = f"{commodity.get('印花编码-前')}{position_front}/{commodity.get('品类')}/{commodity.get('颜色')}/{size}-{commodity.get('品牌')}"
-                    s_commodity_name = f"{commodity.get('印花名称-前')}{position_front}/{commodity.get('品类')}/{commodity.get('颜色')}/{size}-{commodity.get('品牌')}"
-                    combination_commodity_code = f"{commodity.get('印花编码-前')}{position_front}/{commodity.get('品牌')}{commodity.get('品类')}/{commodity.get('颜色')}/{size}"
-                    entity_code = commodity_code
-                    # 回力查询关键字
-                    trademark_HL_A1 = f"{commodity.get('印花编码-前')}{position_front}/{commodity.get('品类')}/{commodity.get('颜色')}"
+        # 处理每个尺码
+        for size in product_info.get('尺码').split('/'):
+            self._process_product_size(product_info, size, weight_worksheet, single_general_ws, 
+                                    single_combo_ws, multi_combo_list, 
+                                    relation_ws, relation_row)
 
-                # 如果只有后印花编码
-                elif not commodity.get('印花编码-前') and commodity.get('印花编码-后'):
-                    position_back = '' if commodity.get('位置-后') == '大图' else commodity.get('位置-后')
+    def _process_product_size(self, product_info: Dict, size: str, weight_worksheet, single_general_ws, 
+                           single_combo_ws, multi_combo_list, 
+                           relation_ws, relation_row: int) -> None:
+        """处理特定尺码的商品"""
+        # 生成商品编码和名称
+        (product_code, product_name, combo_code, 
+         entity_code, hl_trademark) = self._generate_codes_and_names(product_info, size)
+            
+        specification = f"{product_info.get('颜色')};{size}"
+        brand_spec = f"{product_info.get('颜色')};{size}-{product_info.get('品牌')}"
+        single_combo_code = f"纯色/{product_info.get('品类')}/{product_info.get('颜色')}/{size}"
 
-                    commodity_code = f"{commodity.get('印花编码-后')}{position_back}/{commodity.get('品类')}/{commodity.get('颜色')}/{size}-{commodity.get('品牌')}"
-                    s_commodity_name = f"{commodity.get('印花名称-后')}{position_back}/{commodity.get('品类')}/{commodity.get('颜色')}/{size}-{commodity.get('品牌')}"
-                    combination_commodity_code = f"{commodity.get('印花编码-后')}{position_back}/{commodity.get('品牌')}{commodity.get('品类')}/{commodity.get('颜色')}/{size}"
-                    entity_code = commodity_code
-                    # 回力查询关键字
-                    trademark_HL_A1 = f"{commodity.get('印花编码-后')}{position_back}/{commodity.get('品类')}/{commodity.get('颜色')}"
+        # 获取商品重量
+        self._get_product_weight(product_info, weight_worksheet, size)
 
-                # 如果前后印花编码都有
-                elif commodity.get('印花编码-前') and commodity.get('印花编码-后'):
-                    position_front = '' if commodity.get('位置-前') == '大图' else commodity.get('位置-前')
-                    position_back = '' if commodity.get('位置-后') == '大图' else commodity.get('位置-后')
+        # 获取品牌特定数据
+        trademark_data = self._get_brand_specific_info(product_info, brand_spec, size, hl_trademark)
 
-                    commodity_code = f"{commodity.get('印花编码-前')}{position_front}_{commodity.get('印花编码-后')}{position_back}/{commodity.get('品类')}/{commodity.get('颜色')}/{size}-{commodity.get('品牌')}"
-                    s_commodity_name = f"{commodity.get('印花名称-前')}{position_front}_{commodity.get('印花名称-后')}{position_back}/{commodity.get('品类')}/{commodity.get('颜色')}/{size}-{commodity.get('品牌')}"
-                    combination_commodity_code = f"{commodity.get('印花编码-前')}{position_front}_{commodity.get('印花编码-后')}{position_back}/{commodity.get('品牌')}{commodity.get('品类')}/{commodity.get('颜色')}/{size}"
-                    entity_code = commodity_code
-                    # 回力查询关键字
-                    trademark_HL_A1 = f"{commodity.get('印花编码-前')}{position_front}_{commodity.get('印花编码-后')}{position_back}/{commodity.get('品类')}/{commodity.get('颜色')}"
+        # 添加到单品普通资料表
+        self._add_to_single_general_sheet(product_info, product_code, product_name, 
+                                        brand_spec, trademark_data, single_general_ws)
+
+        # 处理单件装
+        if product_info.get('组合形式') == '单件装':
+            relation_ws.cell(relation_row, 8).value = product_code
+
+        # 处理印花组合关系
+        self._add_print_combinations(product_info, combo_code, product_name, 
+                                  entity_code, specification, single_combo_code, 
+                                  trademark_data, single_combo_ws)
+
+        # 处理多件装组合关系
+        if product_info.get('组合形式') == '多件装':
+            self._add_combo_product_to_list(product_info, size, product_code, 
+                                         multi_combo_list, 
+                                         relation_ws, relation_row)
+
+    def _generate_codes_and_names(self, product_info: Dict, size: str) -> Tuple[str, str, str, str, str]:
+        """生成商品编码和名称"""
+        front_pos = '' if product_info.get('位置-前') == '大图' else product_info.get('位置-前')
+        back_pos = '' if product_info.get('位置-后') == '大图' else product_info.get('位置-后')
+        
+        # 仅有前印花
+        if product_info.get('印花编码-前') and not product_info.get('印花编码-后'):
+            product_code = f"{product_info.get('印花编码-前')}{front_pos}/{product_info.get('品类')}/{product_info.get('颜色')}/{size}-{product_info.get('品牌')}"
+            product_name = f"{product_info.get('印花名称-前')}{front_pos}/{product_info.get('品类')}/{product_info.get('颜色')}/{size}-{product_info.get('品牌')}"
+            combo_code = f"{product_info.get('印花编码-前')}{front_pos}/{product_info.get('品牌')}{product_info.get('品类')}/{product_info.get('颜色')}/{size}"
+            hl_trademark = f"{product_info.get('印花编码-前')}{front_pos}/{product_info.get('品类')}/{product_info.get('颜色')}"
+            
+        # 仅有后印花
+        elif not product_info.get('印花编码-前') and product_info.get('印花编码-后'):
+            product_code = f"{product_info.get('印花编码-后')}{back_pos}/{product_info.get('品类')}/{product_info.get('颜色')}/{size}-{product_info.get('品牌')}"
+            product_name = f"{product_info.get('印花名称-后')}{back_pos}/{product_info.get('品类')}/{product_info.get('颜色')}/{size}-{product_info.get('品牌')}"
+            combo_code = f"{product_info.get('印花编码-后')}{back_pos}/{product_info.get('品牌')}{product_info.get('品类')}/{product_info.get('颜色')}/{size}"
+            hl_trademark = f"{product_info.get('印花编码-后')}{back_pos}/{product_info.get('品类')}/{product_info.get('颜色')}"
+            
+        # 前后印花都有
+        elif product_info.get('印花编码-前') and product_info.get('印花编码-后'):
+            product_code = f"{product_info.get('印花编码-前')}{front_pos}_{product_info.get('印花编码-后')}{back_pos}/{product_info.get('品类')}/{product_info.get('颜色')}/{size}-{product_info.get('品牌')}"
+            product_name = f"{product_info.get('印花名称-前')}{front_pos}_{product_info.get('印花名称-后')}{back_pos}/{product_info.get('品类')}/{product_info.get('颜色')}/{size}-{product_info.get('品牌')}"
+            combo_code = f"{product_info.get('印花编码-前')}{front_pos}_{product_info.get('印花编码-后')}{back_pos}/{product_info.get('品牌')}{product_info.get('品类')}/{product_info.get('颜色')}/{size}"
+            hl_trademark = f"{product_info.get('印花编码-前')}{front_pos}_{product_info.get('印花编码-后')}{back_pos}/{product_info.get('品类')}/{product_info.get('颜色')}"
+            
+        # CP品牌特殊处理
+        if product_info.get('品牌') == 'CP':
+            combo_code = combo_code.replace('CP', '')
+            
+        entity_code = product_code
+        return product_code, product_name, combo_code, entity_code, hl_trademark
+
+    def _get_product_weight(self, product_info: Dict, worksheet, size: str) -> None:
+        """从称重表中获取商品重量"""
+        for row in range(2, worksheet.max_row + 1):
+            if (worksheet.cell(row, 1).value == product_info.get('品类') and 
+                str(worksheet.cell(row, 2).value) == str(size)):
+                product_info['重量'] = worksheet.cell(row, 3).value
+                break
                 
-                if commodity.get('品牌') == 'CP':
-                    combination_commodity_code = combination_commodity_code.replace('CP', '')
+        if product_info.get('重量') is None:
+            logging.error(f"称重表查询失败: {product_info.get('品类')} {size}")
+            self.wait_for_exit()
 
-                specification = f"{commodity.get('颜色')};{size}"
-                specification_brand = f"{commodity.get('颜色')};{size}-{commodity.get('品牌')}"
-                single_combination_code = f"纯色/{commodity.get('品类')}/{commodity.get('颜色')}/{size}"
-
-                # 称重表查询
-                for wi in range(2, ws_winfo.max_row + 1):
-                    if ws_winfo.cell(wi, 1).value == commodity.get('品类') and str(ws_winfo.cell(wi, 2).value) == str(size):
-                        commodity['重量'] = ws_winfo.cell(wi, 3).value
-                        break
-                if commodity.get('重量') is None:
-                    logging.warning(f"称重表查询失败: {commodity.get('品类')} {size}")
-                    input_and_exit()
-
-                # 各品牌处理
-                trademark_list = []
-
-                if commodity.get('品牌') == 'HL':
-                    # logging.info(f'trademark_HL_A1:{trademark_HL_A1}')
-                    if commodity.get('组合形式') == '多件装':
-                        commodity['组合装款式商品编码'] = commodity.get('组合装款式商品编码')[0:4] + 'HL' + commodity.get('组合装款式商品编码')[-1:]
-
-                    # 不拆表
-                    try:
-                        ws_HL = wb_HL[commodity.get('品类')]
-                    except Exception as e:
-                        logging.warning(e)
-                        logging.warning(f"回力吊牌信息-打开失败:{commodity.get('品类')}表")
-                        logging.info("按下Enter回车键以退出程序...")
-                        input()
-                        sys.exit()
-
-                    HL_type = ''
-                    for li in range(2, ws_HL_type.max_row + 1):
-                        # logging.info(f'{ws_HL_type.cell(li, 1).value}/{ws_HL_type.cell(li, 2).value}')
-                        if ws_HL_type.cell(li, 1).value == commodity.get('品类') and ws_HL_type.cell(li, 2).value == int(size):
-                            HL_type = ws_HL_type.cell(li, 3).value
-                    if len(HL_type) == 0:
-                        logging.warning(f"回力童装号型对照表查询失败:{commodity.get('品类')}/{size}")
-                        logging.info("按下Enter回车键以退出程序...")
-                        input()
-                        sys.exit()
-
-                    for bi in range(2, ws_HL.max_row + 1):
-                        if ws_HL.cell(bi, 1).value == trademark_HL_A1:
-                            trademark_list = [ws_HL.cell(bi, j).value for j in range(2, 10)]
-                            trademark_list.insert(1, HL_type)
-                            trademark_list.insert(6, size)
-                    if len(trademark_list) == 0:
-                        logging.warning('回力吊牌信息汇总表查询失败')
-                        logging.info("按下Enter回车键以退出程序...")
-                        input()
-                        sys.exit()
-
-                if commodity.get('品牌') == 'BD':
-                    trademark_list = process_brand_data(commodity, wb_BD, commodity.get('品类'), specification_brand, 'BD', (3, 12))
-
-                if commodity.get('品牌') == 'SE':
-                    trademark_list = process_brand_data(commodity, wb_SE, commodity.get('品类'), specification_brand, 'SE', (3, 12))
-
-                if commodity.get('品牌') == 'ML' and commodity.get('性别') == '男':
-                    trademark_list = process_brand_data(commodity, wb_ML_male, commodity.get('品类'), specification_brand, 'ML', (3, 14))
-
-                if commodity.get('品牌') == 'ML' and commodity.get('性别') == '女':
-                    trademark_list = process_brand_data(commodity, wb_ML_female, commodity.get('品类'), specification_brand, 'ML', (3, 14))
-
-                if commodity.get('品牌') == 'JW' and commodity.get('性别') == '男':
-                    trademark_list = process_brand_data(commodity, wb_JW_male, commodity.get('品类'), specification_brand, 'JW', (3, 14))
-
-                if commodity.get('品牌') == 'JW' and commodity.get('性别') == '女':
-                    trademark_list = process_brand_data(commodity, wb_JW_female, commodity.get('品类'), specification_brand, 'JW', (3, 14))
-                    
+    def _get_brand_specific_info(self, product_info: Dict, brand_spec: str, size: str, hl_trademark: str) -> List:
+        """获取品牌特定信息"""
+        trademark_data = []
+        brand = product_info.get('品牌')
+        
+        if brand == 'HL':
+            trademark_data = self._process_HL_brand_info(product_info, brand_spec, size, hl_trademark)
+        elif brand == 'BD':
+            trademark_data = self.fetch_brand_data(product_info, product_info.get('品类'), brand_spec, 'BD', (3, 12))
+        elif brand == 'SE':
+            trademark_data = self.fetch_brand_data(product_info, product_info.get('品类'), brand_spec, 'SE', (3, 12))
+        elif brand == 'ML':
+            gender_key = 'ML_male' if product_info.get('性别') == '男' else 'ML_female'
+            trademark_data = self.fetch_brand_data(product_info, product_info.get('品类'), brand_spec, gender_key, (3, 14))
+        elif brand == 'JW':
+            gender_key = 'JW_male' if product_info.get('性别') == '男' else 'JW_female'
+            trademark_data = self.fetch_brand_data(product_info, product_info.get('品类'), brand_spec, gender_key, (3, 14))
                 
-                # 通用部分处理 （款式编码 商品编码 商品名 分类 颜色及规格 重量 品牌 虚拟分类）
-                list_single_general = [
-                    commodity.get('单件组合装款式编码'),
-                    commodity_code,
-                    s_commodity_name,
-                    commodity.get('商品分类'),
-                    specification_brand,
-                    commodity.get('重量'),
-                    'YS',
-                    commodity.get('季节')
-                ] + trademark_list
+        return trademark_data
 
-                if commodity_code not in s:
-                    s.add(commodity_code)
-                    ws_single_general.append(list_single_general)
+    def _process_HL_brand_info(self, product_info: Dict, brand_spec: str, size: str, hl_trademark: str) -> List:
+        """处理回力品牌特定信息"""
+        # 多件装特殊处理
+        if product_info.get('组合形式') == '多件装':
+            temp_value = product_info.get('组合装款式商品编码')
+            product_info['组合装款式商品编码'] = f"{temp_value[:4]}HL{temp_value[-1:]}"
 
-                # 单件装处理 
-                if len(commodities) == 1 and commodity.get('组合形式') == '单件装':
-                    ws_relationship.cell(relationship_row, 8).value = commodity_code
-                    relationship_row += 1
+        try:
+            brand_ws = self.brand_workbooks['HL'][product_info.get('品类')]
+        except Exception as e:
+            logging.error(f"回力吊牌信息表加载失败: {product_info.get('品类')}: {str(e)}")
+            self.wait_for_exit()
 
-                # 处理印花编码-前/后情况  （组合款式编码 组合商品编码 组合商品名称 组合商品实体编码 虚拟分类 组合颜色规格 商品编码 数量 应占售价 品牌）
-                if commodity.get('印花编码-前') and not commodity.get('印花编码-后'):
-                    append_combination(commodity, combination_commodity_code, s_commodity_name, entity_code, specification, commodity.get('印花编码-前'), trademark_list, ws_single_combination, s)
-                    append_combination(commodity, combination_commodity_code, s_commodity_name, entity_code, specification, single_combination_code, trademark_list, ws_single_combination, s)
-
-                elif not commodity.get('印花编码-前') and commodity.get('印花编码-后'):
-                    append_combination(commodity, combination_commodity_code, s_commodity_name, entity_code, specification, commodity.get('印花编码-后'), trademark_list, ws_single_combination, s)
-                    append_combination(commodity, combination_commodity_code, s_commodity_name, entity_code, specification, single_combination_code, trademark_list, ws_single_combination, s)
-
-                elif commodity.get('印花编码-前') and commodity.get('印花编码-后'):
-                    append_combination(commodity, combination_commodity_code, s_commodity_name, entity_code, specification, commodity.get('印花编码-前'), trademark_list, ws_single_combination, s)
-                    append_combination(commodity, combination_commodity_code, s_commodity_name, entity_code, specification, commodity.get('印花编码-后'), trademark_list, ws_single_combination, s)
-                    append_combination(commodity, combination_commodity_code, s_commodity_name, entity_code, specification, single_combination_code, trademark_list, ws_single_combination, s)
-
-        if commodity.get('组合形式') == '多件装':
-            picture_position_color_list = []
-            picture_color_list = []
-            color_list = []
-
-            # 处理每个商品的印花编码及颜色
-            for commodity in commodities:
-                color = commodity.get('颜色')
+        # 查找尺码类型
+        size_type = ''
+        for row in range(2, self.size_chart_worksheet.max_row + 1):
+            if (self.size_chart_worksheet.cell(row, 1).value == product_info.get('品类') and 
+                self.size_chart_worksheet.cell(row, 2).value == int(size)):
+                size_type = self.size_chart_worksheet.cell(row, 3).value
+                break
                 
-                # 仅有前印花
-                if commodity.get('印花编码-前') and not commodity.get('印花编码-后'):
-                    temp_code1, temp_code2 = generate_temp_codes(commodity, '前', color)
-                    append_codes(picture_position_color_list, picture_color_list, color_list, temp_code1, temp_code2, color)
+        if not size_type:
+            logging.error(f"回力童装号型对照表查询失败: {product_info.get('品类')}/{size}")
+            self.wait_for_exit()
 
-                # 仅有后印花
-                elif not commodity.get('印花编码-前') and commodity.get('印花编码-后'):
-                    temp_code1, temp_code2 = generate_temp_codes(commodity, '后', color)
-                    append_codes(picture_position_color_list, picture_color_list, color_list, temp_code1, temp_code2, color)
+        # 获取商标数据
+        for row in range(2, brand_ws.max_row + 1):
+            if brand_ws.cell(row, 1).value == hl_trademark:
+                trademark_data = [brand_ws.cell(row, col).value for col in range(2, 10)]
+                trademark_data.insert(1, size_type)  # 插入尺码类型
+                trademark_data.insert(6, size)       # 插入尺码
+                return trademark_data
+                
+        logging.error('回力吊牌信息汇总表查询失败')
+        self.wait_for_exit()
 
-                # 前后印花都有
-                elif commodity.get('印花编码-前') and commodity.get('印花编码-后'):
-                    temp_code1 = f"{commodity.get('印花名称-前')}{commodity.get('位置代码-前')}_{commodity.get('印花名称-后')}{commodity.get('位置代码-后')}/{color}"
-                    temp_code2 = f"{commodity.get('印花名称-前')}{commodity.get('位置-前')}_{commodity.get('印花名称-后')}{commodity.get('位置-后')}/{color}"
-                    append_codes(picture_position_color_list, picture_color_list, color_list, temp_code1, temp_code2, color)
+    def _add_to_single_general_sheet(self, product_info: Dict, product_code: str, 
+                                   product_name: str, brand_spec: str, 
+                                   trademark_data: List, worksheet) -> None:
+        """添加记录到单品普通资料表"""
+        record_data = [
+            product_info.get('单件组合装款式编码'),
+            product_code,
+            product_name,
+            product_info.get('商品分类'),
+            brand_spec,
+            product_info.get('重量'),
+            'YS',
+            product_info.get('季节')
+        ] + trademark_data
 
-            picture_position_color = '-'.join(picture_position_color_list)
-            picture_color = '-'.join(picture_color_list)
-            combination_color = '-'.join(color_list)
+        if product_code not in self.processed_codes:
+            self.processed_codes.add(product_code)
+            worksheet.append(record_data)
 
-            # 补充关系对应表
-            for size in commodity.get('尺码').split('/'):
-                combination_commodity_code = f"{commodity.get('组合装款式商品编码')}-{picture_position_color}-{size}"
-                ws_relationship.cell(relationship_row, 8).value = combination_commodity_code
-                relationship_row += 1
+    def _add_print_combinations(self, product_info: Dict, combo_code: str, 
+                              product_name: str, entity_code: str, 
+                              specification: str, single_combo_code: str, 
+                              trademark_data: List, worksheet) -> None:
+        """添加印花组合关系到组合构成表"""
+        # 仅有前印花
+        if product_info.get('印花编码-前') and not product_info.get('印花编码-后'):
+            self.add_combo_record(product_info, combo_code, product_name, 
+                                entity_code, specification, product_info.get('印花编码-前'), 
+                                trademark_data, worksheet)
+            self.add_combo_record(product_info, combo_code, product_name, 
+                                entity_code, specification, single_combo_code, 
+                                trademark_data, worksheet)
+                                  
+        # 仅有后印花
+        elif not product_info.get('印花编码-前') and product_info.get('印花编码-后'):
+            self.add_combo_record(product_info, combo_code, product_name, 
+                                entity_code, specification, product_info.get('印花编码-后'), 
+                                trademark_data, worksheet)
+            self.add_combo_record(product_info, combo_code, product_name, 
+                                entity_code, specification, single_combo_code, 
+                                trademark_data, worksheet)
+                                  
+        # 前后印花都有
+        elif product_info.get('印花编码-前') and product_info.get('印花编码-后'):
+            self.add_combo_record(product_info, combo_code, product_name, 
+                                entity_code, specification, product_info.get('印花编码-前'), 
+                                trademark_data, worksheet)
+            self.add_combo_record(product_info, combo_code, product_name, 
+                                entity_code, specification, product_info.get('印花编码-后'), 
+                                trademark_data, worksheet)
+            self.add_combo_record(product_info, combo_code, product_name, 
+                                entity_code, specification, single_combo_code, 
+                                trademark_data, worksheet)
 
-            # 处理每个商品的组合装信息
-            for commodity in commodities:
-                for size in commodity.get('尺码').split('/'):
-                    combination_commodity_code = f"{commodity.get('组合装款式商品编码')}-{picture_position_color}-{size}"
-                    combination_commodity_name = f"{commodity.get('组合装款式商品编码')}-{picture_color}-{size}"
-                    combination_color_code = f"{combination_color};{size}"
+    def _add_combo_product_to_list(self, product_info: Dict, size: str, product_code: str,
+                                combo_list: List, 
+                                relation_ws, relation_row: int) -> None:
+        """添加多件装商品到临时列表"""
+        position_color_list = []
+        color_list = []
+        color_value_list = []
 
-                    # 生成商品编码
-                    if commodity.get('印花编码-前') and not commodity.get('印花编码-后'):
-                        commodity_code = f"{commodity.get('印花编码-前')}{commodity.get('位置-前')}/{commodity.get('品类')}/{commodity.get('颜色')}/{size}-{commodity.get('品牌')}"
-                    elif not commodity.get('印花编码-前') and commodity.get('印花编码-后'):
-                        commodity_code = f"{commodity.get('印花编码-后')}{commodity.get('位置-后')}/{commodity.get('品类')}/{commodity.get('颜色')}/{size}-{commodity.get('品牌')}"
-                    elif commodity.get('印花编码-前') and commodity.get('印花编码-后'):
-                        commodity_code = f"{commodity.get('印花编码-前')}{commodity.get('位置-前')}_{commodity.get('印花编码-后')}{commodity.get('位置-后')}/{commodity.get('品类')}/{commodity.get('颜色')}/{size}-{commodity.get('品牌')}"
+        # 处理印花编码及颜色
+        color = product_info.get('颜色')
+        
+        # 仅有前印花
+        if product_info.get('印花编码-前') and not product_info.get('印花编码-后'):
+            code1, code2 = self.generate_print_codes(product_info, '前', color)
+            self.store_print_codes(position_color_list, color_list, 
+                                color_value_list, code1, code2, color)
+                            
+        # 仅有后印花
+        elif not product_info.get('印花编码-前') and product_info.get('印花编码-后'):
+            code1, code2 = self.generate_print_codes(product_info, '后', color)
+            self.store_print_codes(position_color_list, color_list, 
+                                color_value_list, code1, code2, color)
+                            
+        # 前后印花都有
+        elif product_info.get('印花编码-前') and product_info.get('印花编码-后'):
+            code1 = f"{product_info.get('印花名称-前')}{product_info.get('位置代码-前')}_{product_info.get('印花名称-后')}{product_info.get('位置代码-后')}/{color}"
+            code2 = f"{product_info.get('印花名称-前')}{product_info.get('位置-前')}_{product_info.get('印花名称-后')}{product_info.get('位置-后')}/{color}"
+            self.store_print_codes(position_color_list, color_list, 
+                                color_value_list, code1, code2, color)
 
-                    # 组合款式编码 组合商品编码 组合商品名称 虚拟分类 组合颜色规格 商品编码 数量 应占售价 品牌
-                    list_multiple_combination = [
-                        commodity.get('组合装款式编码'),
-                        combination_commodity_code,
-                        combination_commodity_name,
-                        '成品',
-                        combination_color_code,
-                        commodity_code,
-                        1,
-                        0,
-                        'YS'
-                    ]
-                    ws_multiple_combination_tmplst.append(list_multiple_combination)
+        position_color_str = '-'.join(position_color_list)
+        color_str = '-'.join(color_list)
+        combo_color = '-'.join(color_value_list)
 
-    if ws_multiple_combination_tmplst:
-        duplicates = find_duplicates(ws_multiple_combination_tmplst)
-        list_multiple_combination.clear()
-        for duplicate in duplicates:
-                # logging.info(duplicate)
-                list_multiple_combination = duplicate[0]
-                list_multiple_combination[-3] = duplicate[1]
-                ws_multiple_combination.append(list_multiple_combination)
+        # 设置关系表对应值
+        combo_code = f"{product_info.get('组合装款式商品编码')}-{position_color_str}-{size}"
+        relation_ws.cell(relation_row, 8).value = combo_code
 
-    wb_cinfo.close()
-    now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        # 添加到多件装组合临时列表
+        combo_list.append([
+            product_info.get('组合装款式编码'),
+            combo_code,
+            f"{product_info.get('组合装款式商品编码')}-{color_str}-{size}",
+            '成品',
+            f"{combo_color};{size}",
+            product_code,  # 使用传入的商品编码
+            1,
+            0,
+            'YS'
+        ])
 
-    logging.info('_________________制作完成________________')
-    logging.info(f'保存编码生成表到文件: 编码生成表_{now}.xlsx')
-    wb_final.save(f'编码生成表_{now}.xlsx')
+if __name__ == "__main__":
+    logging.info('*************************************')
+    logging.info('*       YS商品编码生成器 v1.0        *')
+    logging.info('*************************************')
 
-    logging.info(f'保存关系对应表到文件: 关系对应生成表_{now}.xlsx')
-    wb_relationship.save(f'关系对应生成表_{now}.xlsx')
-
-    logging.info(" ")
-    logging.info("按下Enter回车键以退出程序...")
-    input()
+    try:
+        generator = ProductCodeGenerator()
+        generator.generate_product_codes()
+    except Exception as e:
+        logging.error(f"程序运行出错: {str(e)}", exc_info=True)
+    finally:
+        logging.info("程序执行完毕")
+        logging.info("按下Enter回车键退出...")
+        input()
